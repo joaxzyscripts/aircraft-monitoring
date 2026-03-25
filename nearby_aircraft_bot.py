@@ -26,6 +26,7 @@ NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
 LOCATION_CACHE_FILE = Path(__file__).with_name("location_cache.json")
 LAST_LOCATION_FILE = Path(__file__).with_name("last_location.json")
+RADAR_CONFIG_FILE = Path(__file__).with_name("radar_config.json")
 _LAST_NOMINATIM_REQUEST_TS = 0.0
 
 
@@ -108,6 +109,38 @@ class GeocodeCandidate:
     latitude: float
     longitude: float
     display_name: str
+
+
+@dataclass(slots=True)
+class RadarConfig:
+    radius_km: float = 50.0
+    interval: float = 15.0
+    timeout: float = 20.0
+    max_aircraft: int = 10
+    include_ground: bool = False
+    min_altitude_m: float | None = None
+    max_age_seconds: float | None = 30.0
+    extended: bool = False
+    close_alert_enabled: bool = True
+    close_alert_distance_km: float = 5.0
+    close_alert_repeat_seconds: float = 120.0
+    close_alert_terminal_bell: bool = False
+
+
+@dataclass(slots=True)
+class RadarRuntimeOptions:
+    radius_km: float
+    interval: float
+    timeout: float
+    max_aircraft: int
+    include_ground: bool
+    min_altitude_m: float | None
+    max_age_seconds: float | None
+    extended: bool
+    close_alert_enabled: bool
+    close_alert_distance_km: float
+    close_alert_repeat_seconds: float
+    close_alert_terminal_bell: bool
 
 
 class OpenSkyTokenManager:
@@ -569,6 +602,66 @@ def parse_selected_location(item: dict[str, Any]) -> SelectedLocation | None:
     )
 
 
+def radar_config_to_record(config: RadarConfig) -> dict[str, Any]:
+    return {
+        "radius_km": config.radius_km,
+        "interval": config.interval,
+        "timeout": config.timeout,
+        "max_aircraft": config.max_aircraft,
+        "include_ground": config.include_ground,
+        "min_altitude_m": config.min_altitude_m,
+        "max_age_seconds": config.max_age_seconds,
+        "extended": config.extended,
+        "close_alert_enabled": config.close_alert_enabled,
+        "close_alert_distance_km": config.close_alert_distance_km,
+        "close_alert_repeat_seconds": config.close_alert_repeat_seconds,
+        "close_alert_terminal_bell": config.close_alert_terminal_bell,
+    }
+
+
+def parse_radar_config(item: dict[str, Any]) -> RadarConfig:
+    defaults = RadarConfig()
+    return RadarConfig(
+        radius_km=maybe_float(item.get("radius_km")) or defaults.radius_km,
+        interval=maybe_float(item.get("interval")) or defaults.interval,
+        timeout=maybe_float(item.get("timeout")) or defaults.timeout,
+        max_aircraft=maybe_int(item.get("max_aircraft")) or defaults.max_aircraft,
+        include_ground=bool(item.get("include_ground", defaults.include_ground)),
+        min_altitude_m=maybe_float(item.get("min_altitude_m")),
+        max_age_seconds=maybe_float(item.get("max_age_seconds")),
+        extended=bool(item.get("extended", defaults.extended)),
+        close_alert_enabled=bool(item.get("close_alert_enabled", defaults.close_alert_enabled)),
+        close_alert_distance_km=(
+            maybe_float(item.get("close_alert_distance_km")) or defaults.close_alert_distance_km
+        ),
+        close_alert_repeat_seconds=(
+            maybe_float(item.get("close_alert_repeat_seconds")) or defaults.close_alert_repeat_seconds
+        ),
+        close_alert_terminal_bell=bool(
+            item.get("close_alert_terminal_bell", defaults.close_alert_terminal_bell)
+        ),
+    )
+
+
+def load_radar_config() -> RadarConfig:
+    if not RADAR_CONFIG_FILE.exists():
+        return RadarConfig()
+    try:
+        raw = json.loads(RADAR_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return RadarConfig()
+    if not isinstance(raw, dict):
+        return RadarConfig()
+    return parse_radar_config(raw)
+
+
+def save_radar_config(config: RadarConfig) -> None:
+    RADAR_CONFIG_FILE.write_text(
+        json.dumps(radar_config_to_record(config), indent=2),
+        encoding="utf-8",
+    )
+
+
 def load_last_location() -> SelectedLocation | None:
     if not LAST_LOCATION_FILE.exists():
         return None
@@ -743,6 +836,126 @@ def prompt_line(prompt: str) -> str:
         raise SystemExit("Location selection was interrupted before a choice was provided.") from exc
 
 
+def prompt_bool(prompt: str, default: bool) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        raw = prompt_line(f"{prompt} [{suffix}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("Enter Y or N.")
+
+
+def prompt_float_value(prompt: str, default: float, *, minimum: float | None = None) -> float:
+    while True:
+        raw = prompt_line(f"{prompt} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            print("Enter a decimal number.")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"Enter a value greater than or equal to {minimum}.")
+            continue
+        return value
+
+
+def prompt_int_value(prompt: str, default: int, *, minimum: int | None = None) -> int:
+    while True:
+        raw = prompt_line(f"{prompt} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Enter a whole number.")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"Enter a value greater than or equal to {minimum}.")
+            continue
+        return value
+
+
+def prompt_optional_float(
+    prompt: str,
+    default: float | None,
+    *,
+    minimum: float | None = None,
+) -> float | None:
+    default_label = "off" if default is None else str(default)
+    while True:
+        raw = prompt_line(f"{prompt} [{default_label}]: ").strip()
+        if not raw:
+            return default
+        if raw.lower() in {"off", "none", "disable", "disabled"}:
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            print("Enter a decimal number or 'off'.")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"Enter a value greater than or equal to {minimum}, or 'off'.")
+            continue
+        return value
+
+
+def configure_radar(existing: RadarConfig) -> RadarConfig:
+    print("Radar configuration wizard")
+    print("Press Enter to keep the current value.")
+
+    close_alert_enabled = prompt_bool(
+        "Enable close-aircraft alerts?",
+        existing.close_alert_enabled,
+    )
+    close_alert_distance_km = existing.close_alert_distance_km
+    close_alert_repeat_seconds = existing.close_alert_repeat_seconds
+    close_alert_terminal_bell = existing.close_alert_terminal_bell
+    if close_alert_enabled:
+        close_alert_distance_km = prompt_float_value(
+            "Alert distance in km",
+            existing.close_alert_distance_km,
+            minimum=0.1,
+        )
+        close_alert_repeat_seconds = prompt_float_value(
+            "Alert cooldown in seconds",
+            existing.close_alert_repeat_seconds,
+            minimum=0.0,
+        )
+        close_alert_terminal_bell = prompt_bool(
+            "Play terminal bell on close alerts?",
+            existing.close_alert_terminal_bell,
+        )
+
+    return RadarConfig(
+        radius_km=prompt_float_value("Radar range in km", existing.radius_km, minimum=0.1),
+        interval=prompt_float_value("Polling interval in seconds", existing.interval, minimum=1.0),
+        timeout=prompt_float_value("HTTP timeout in seconds", existing.timeout, minimum=1.0),
+        max_aircraft=prompt_int_value("Maximum aircraft rows to print", existing.max_aircraft, minimum=1),
+        include_ground=prompt_bool("Include aircraft on the ground?", existing.include_ground),
+        min_altitude_m=prompt_optional_float(
+            "Minimum altitude in meters before an aircraft is shown",
+            existing.min_altitude_m,
+            minimum=0.0,
+        ),
+        max_age_seconds=prompt_optional_float(
+            "Maximum aircraft data age in seconds",
+            existing.max_age_seconds,
+            minimum=0.0,
+        ),
+        extended=prompt_bool("Request extended OpenSky state vectors?", existing.extended),
+        close_alert_enabled=close_alert_enabled,
+        close_alert_distance_km=close_alert_distance_km,
+        close_alert_repeat_seconds=close_alert_repeat_seconds,
+        close_alert_terminal_bell=close_alert_terminal_bell,
+    )
+
+
 def prompt_for_location_choice() -> str:
     print("Choose how to set your monitoring location:")
     print("1. Automatic location (IP-based, approximate)")
@@ -905,15 +1118,63 @@ def choose_location(timeout: float, *, force_prompt: bool = False) -> SelectedLo
         return selected
 
 
-def validate_args(args: argparse.Namespace) -> None:
-    if args.radius_km <= 0:
+class CloseAlertTracker:
+    def __init__(self, repeat_seconds: float) -> None:
+        self.repeat_seconds = repeat_seconds
+        self._last_alert_epoch: dict[str, float] = {}
+
+    def ready(self, icao24: str, now_monotonic: float) -> bool:
+        last_seen = self._last_alert_epoch.get(icao24)
+        if last_seen is None or now_monotonic - last_seen >= self.repeat_seconds:
+            self._last_alert_epoch[icao24] = now_monotonic
+            return True
+        return False
+
+
+def resolve_runtime_options(args: argparse.Namespace, config: RadarConfig) -> RadarRuntimeOptions:
+    return RadarRuntimeOptions(
+        radius_km=args.radius_km if args.radius_km is not None else config.radius_km,
+        interval=args.interval if args.interval is not None else config.interval,
+        timeout=args.timeout if args.timeout is not None else config.timeout,
+        max_aircraft=args.max_aircraft if args.max_aircraft is not None else config.max_aircraft,
+        include_ground=args.include_ground if args.include_ground is not None else config.include_ground,
+        min_altitude_m=args.min_altitude_m if args.min_altitude_m is not None else config.min_altitude_m,
+        max_age_seconds=args.max_age_seconds if args.max_age_seconds is not None else config.max_age_seconds,
+        extended=args.extended if args.extended is not None else config.extended,
+        close_alert_enabled=(
+            args.close_alerts if args.close_alerts is not None else config.close_alert_enabled
+        ),
+        close_alert_distance_km=(
+            args.close_alert_distance_km
+            if args.close_alert_distance_km is not None
+            else config.close_alert_distance_km
+        ),
+        close_alert_repeat_seconds=(
+            args.close_alert_repeat_seconds
+            if args.close_alert_repeat_seconds is not None
+            else config.close_alert_repeat_seconds
+        ),
+        close_alert_terminal_bell=(
+            args.close_alert_bell
+            if args.close_alert_bell is not None
+            else config.close_alert_terminal_bell
+        ),
+    )
+
+
+def validate_runtime_options(options: RadarRuntimeOptions, args: argparse.Namespace) -> None:
+    if options.radius_km <= 0:
         raise SystemExit("Radius must be greater than 0.")
-    if args.interval <= 0:
+    if options.interval <= 0:
         raise SystemExit("Interval must be greater than 0.")
-    if args.timeout <= 0:
+    if options.timeout <= 0:
         raise SystemExit("Timeout must be greater than 0.")
-    if args.max_aircraft <= 0:
+    if options.max_aircraft <= 0:
         raise SystemExit("Max aircraft must be greater than 0.")
+    if options.close_alert_distance_km <= 0:
+        raise SystemExit("Close alert distance must be greater than 0.")
+    if options.close_alert_repeat_seconds < 0:
+        raise SystemExit("Close alert repeat seconds cannot be negative.")
     if (args.client_id and not args.client_secret) or (args.client_secret and not args.client_id):
         raise SystemExit("Set both --client-id and --client-secret, or neither.")
 
@@ -926,6 +1187,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
+        "--configure",
+        action="store_true",
+        help="Open the interactive radar configuration wizard and save the result.",
+    )
+    parser.add_argument(
         "--change-location",
         action="store_true",
         help="Ignore the saved location and choose a new place for this run.",
@@ -933,48 +1199,74 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--radius-km",
         type=float,
-        default=50.0,
-        help="Radius to monitor around the center point. Default: 50 km.",
+        default=None,
+        help="Radius to monitor around the center point. Overrides the config file.",
     )
     parser.add_argument(
         "--interval",
         type=float,
-        default=15.0,
-        help="Polling interval in seconds. Default: 15.",
+        default=None,
+        help="Polling interval in seconds. Overrides the config file.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=20.0,
-        help="HTTP timeout for the OpenSky API request. Default: 20.",
+        default=None,
+        help="HTTP timeout for the OpenSky API request. Overrides the config file.",
     )
     parser.add_argument(
         "--max-aircraft",
         type=int,
-        default=10,
-        help="Maximum rows to print in each snapshot. Default: 10.",
+        default=None,
+        help="Maximum rows to print in each snapshot. Overrides the config file.",
     )
     parser.add_argument(
         "--include-ground",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Include aircraft currently flagged as on the ground.",
     )
     parser.add_argument(
         "--min-altitude-m",
         type=float,
         default=None,
-        help="Ignore aircraft below this altitude in meters.",
+        help="Ignore aircraft below this altitude in meters. Overrides the config file.",
     )
     parser.add_argument(
         "--max-age-seconds",
         type=float,
-        default=30.0,
-        help="Ignore aircraft that have not been updated recently. Default: 30.",
+        default=None,
+        help="Ignore aircraft that have not been updated recently. Overrides the config file.",
     )
     parser.add_argument(
         "--extended",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Request extended state vectors from OpenSky when available.",
+    )
+    parser.add_argument(
+        "--close-alerts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable close-aircraft alerts for this run.",
+    )
+    parser.add_argument(
+        "--close-alert-distance-km",
+        type=float,
+        default=None,
+        help="Distance threshold for close-aircraft alerts. Overrides the config file.",
+    )
+    parser.add_argument(
+        "--close-alert-repeat-seconds",
+        type=float,
+        default=None,
+        help="Cooldown before the same aircraft can trigger another close alert.",
+    )
+    parser.add_argument(
+        "--close-alert-bell",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Play a terminal bell when a close-aircraft alert fires.",
     )
     parser.add_argument(
         "--once",
@@ -997,28 +1289,39 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def run(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
-    validate_args(args)
+    radar_config = load_radar_config()
 
-    selected_location = choose_location(args.timeout, force_prompt=args.change_location)
+    if args.configure:
+        radar_config = configure_radar(radar_config)
+        save_radar_config(radar_config)
+        print(f"Saved radar config to {RADAR_CONFIG_FILE}")
+        print(json.dumps(radar_config_to_record(radar_config), indent=2))
+        return 0
 
-    boxes = build_bounding_boxes(selected_location.latitude, selected_location.longitude, args.radius_km)
+    options = resolve_runtime_options(args, radar_config)
+    validate_runtime_options(options, args)
+
+    selected_location = choose_location(options.timeout, force_prompt=args.change_location)
+
+    boxes = build_bounding_boxes(selected_location.latitude, selected_location.longitude, options.radius_km)
     client = OpenSkyClient(
-        timeout=args.timeout,
+        timeout=options.timeout,
         client_id=args.client_id,
         client_secret=args.client_secret,
     )
     tracker = NearbyTracker(
         center_latitude=selected_location.latitude,
         center_longitude=selected_location.longitude,
-        radius_km=args.radius_km,
-        include_ground=args.include_ground,
-        min_altitude_m=args.min_altitude_m,
-        max_age_seconds=args.max_age_seconds,
+        radius_km=options.radius_km,
+        include_ground=options.include_ground,
+        min_altitude_m=options.min_altitude_m,
+        max_age_seconds=options.max_age_seconds,
     )
+    close_alerts = CloseAlertTracker(options.close_alert_repeat_seconds)
 
     auth_mode = "OAuth client credentials" if client.authenticated else "anonymous access"
     print(
-        f"Tracking aircraft within {args.radius_km:.1f} km of "
+        f"Tracking aircraft within {options.radius_km:.1f} km of "
         f"{selected_location.label} "
         f"({selected_location.latitude:.5f}, {selected_location.longitude:.5f}) "
         f"using OpenSky ({auth_mode})."
@@ -1026,7 +1329,15 @@ def run(argv: list[str] | None = None) -> int:
     print(f"Location source: {selected_location.source}")
     if selected_location.note:
         print(selected_location.note)
-    if not client.authenticated and args.interval < 10:
+    if options.close_alert_enabled:
+        print(
+            f"Close alerts: on within {options.close_alert_distance_km:.1f} km "
+            f"(cooldown {options.close_alert_repeat_seconds:.0f}s, "
+            f"bell {'on' if options.close_alert_terminal_bell else 'off'})"
+        )
+    else:
+        print("Close alerts: off")
+    if not client.authenticated and options.interval < 10:
         print(
             "Warning: anonymous OpenSky access has 10-second data resolution, so "
             "polling faster than 10 seconds will usually repeat the same snapshot."
@@ -1036,7 +1347,7 @@ def run(argv: list[str] | None = None) -> int:
         while True:
             loop_started = time.monotonic()
             try:
-                result = client.fetch_states_for_boxes(boxes, extended=args.extended)
+                result = client.fetch_states_for_boxes(boxes, extended=options.extended)
                 nearby = tracker.filter_nearby(result.states, now_epoch=result.fetched_at)
                 entered, exited = tracker.diff(nearby)
 
@@ -1050,15 +1361,26 @@ def run(argv: list[str] | None = None) -> int:
                 for item in exited:
                     print(format_event("EXIT", item))
 
-                print(f"{len(nearby)} aircraft inside {args.radius_km:.1f} km")
-                print(render_aircraft_table(nearby, limit=args.max_aircraft))
+                if options.close_alert_enabled:
+                    now_monotonic = time.monotonic()
+                    for item in nearby:
+                        if item.distance_km > options.close_alert_distance_km:
+                            continue
+                        if not close_alerts.ready(item.state.icao24, now_monotonic):
+                            continue
+                        if options.close_alert_terminal_bell:
+                            print("\a", end="")
+                        print(format_event("ALERT", item))
+
+                print(f"{len(nearby)} aircraft inside {options.radius_km:.1f} km")
+                print(render_aircraft_table(nearby, limit=options.max_aircraft))
             except ApiError as exc:
                 print(f"[{local_now_string()}] {exc}", file=sys.stderr)
 
             if args.once:
                 return 0
 
-            sleep_for = args.interval - (time.monotonic() - loop_started)
+            sleep_for = options.interval - (time.monotonic() - loop_started)
             if sleep_for > 0:
                 time.sleep(sleep_for)
     except KeyboardInterrupt:
