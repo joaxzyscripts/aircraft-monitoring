@@ -16,3 +16,20 @@ python nearby_aircraft_bot.py --radius-km 40
 ```
 
 You can also pass `--client-id` and `--client-secret` directly.
+
+# Radar Config
+
+The config wizard lets you save:
+
+- radar range in km
+- polling interval
+- HTTP timeout
+- maximum number of aircraft rows to print
+- whether to include aircraft on the ground
+- optional minimum altitude filter
+- optional maximum data age filter
+- whether to request extended OpenSky state vectors
+- close-aircraft alerts
+- close-alert distance in km
+- close-alert cooldown in seconds
+- optional terminal bell on close alerts
